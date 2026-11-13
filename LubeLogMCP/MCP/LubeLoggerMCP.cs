@@ -1,4 +1,4 @@
-﻿using LubeLogMCP.Helper;
+using LubeLogMCP.Helper;
 using LubeLogMCP.Models;
 using ModelContextProtocol.Server;
 using System.ComponentModel;
@@ -8,7 +8,7 @@ using System.Text.Json;
 namespace LubeLogMCP.MCP
 {
     [McpServerToolType]
-    public class LubeLoggerMCP
+    public partial class LubeLoggerMCP
     {
         private string instance { get; set; }
         private string username { get; set; }
@@ -23,7 +23,7 @@ namespace LubeLogMCP.MCP
             _httpClientFactory = httpClientFactory;
             _httpContextAccessor = httpContextAccessor;
         }
-        [McpServerTool, Description("Gets status of LubeLogger MCP.")]
+        [McpServerTool(ReadOnly = true), Description("Gets status of LubeLogger MCP.")]
         public async Task<string> GetLubeLoggerMCPStatus()
         {
             string result = $"MCP Version: {StaticHelper.VersionNumber}";
@@ -46,7 +46,7 @@ namespace LubeLogMCP.MCP
                 try
                 {
                     var httpClient = _httpClientFactory.CreateClient();
-                    var serverResponse = await httpClient.SendAsync(request).Result.Content.ReadFromJsonAsync<ServerVersion>();
+                    var serverResponse = await (await httpClient.SendAsync(request)).Content.ReadFromJsonAsync<ServerVersion>();
                     if (!string.IsNullOrWhiteSpace(serverResponse?.CurrentVersion))
                     {
                         result += $"LubeLogger Version: {serverResponse.CurrentVersion}";
@@ -63,7 +63,7 @@ namespace LubeLogMCP.MCP
             }
             return result;
         }
-        [McpServerTool, Description("Gets vehicles in garage.")]
+        [McpServerTool(ReadOnly = true), Description("Gets vehicles in garage.")]
         public async Task<string> GetVehicles()
         {
             string endpoint = $"{instance}/api/vehicles";
@@ -73,7 +73,7 @@ namespace LubeLogMCP.MCP
             try
             {
                 var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadFromJsonAsync<List<Vehicle>>();
+                var result = await (await httpClient.SendAsync(request)).Content.ReadFromJsonAsync<List<Vehicle>>();
                 var resultString = string.Empty;
                 foreach(Vehicle vehicle in result ?? new List<Vehicle>())
                 {
@@ -84,10 +84,10 @@ namespace LubeLogMCP.MCP
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Check if a vehicle is an electric vehicle")]
+        [McpServerTool(ReadOnly = true), Description("Check if a vehicle is an electric vehicle")]
         public async Task<string> GetVehicleIsElectric([Description("id of the vehicle")] int vehicleId)
         {
             string endpoint = $"{instance}/api/vehicles";
@@ -96,7 +96,7 @@ namespace LubeLogMCP.MCP
             try
             {
                 var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadFromJsonAsync<List<Vehicle>>();
+                var result = await (await httpClient.SendAsync(request)).Content.ReadFromJsonAsync<List<Vehicle>>();
                 foreach (Vehicle vehicle in result ?? new List<Vehicle>())
                 {
                     if (vehicle.Id == vehicleId && vehicle.IsElectric)
@@ -108,10 +108,10 @@ namespace LubeLogMCP.MCP
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Adds a fuel record.")]
+        [McpServerTool(ReadOnly = false, Destructive = false), Description("Adds a fuel record.")]
         public async Task<string> AddFuelRecord(
             [Description("id of the vehicle")] int vehicleId,
             [Description("Date of fuel up")] DateTime date,
@@ -122,8 +122,10 @@ namespace LubeLogMCP.MCP
             [Description("Any missed fuel ups")] bool missedFuelUp,
             [Description("State of Charge at beginning of charge session if charging an electric vehicle, default to 20 if not an electric vehicle")] int startingSoc,
             [Description("State of Charge at end of charge session if charging an electric vehicle, default to 80 if not an electric vehicle")] int endingSoc,
-            [Description("Any extra fields configured for gasrecord")] List<ExtraField> extraFields)
+            [Description("Any extra fields configured for gasrecord")] List<ExtraField> extraFields,
+            [Description("Validate with LubeLogger but write nothing")] bool dryRun = false)
         {
+            if (vehicleId <= 0 || odometer < 0 || cost < 0 || volume <= 0) throw new ArgumentException("Vehicle, volume, cost or odometer invalid");
             var requestData = new PostRequestModel
             {
                 Date = date.ToString("yyyy-MM-dd"),
@@ -143,6 +145,7 @@ namespace LubeLogMCP.MCP
 
             string endpoint = $"{instance}/api/vehicle/gasrecords/add?vehicleId={vehicleId}";
 
+            endpoint += (endpoint.Contains('?') ? "&" : "?") + "dryRun=" + dryRun;
             var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
             {
                 Content = new StringContent(JsonSerializer.Serialize(requestData), Encoding.UTF8, "application/json")
@@ -150,24 +153,25 @@ namespace LubeLogMCP.MCP
             AddAuthHeaders(request);
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadAsStringAsync();
+                var result = await Send(request);
 
                 return result;
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Adds a service record.")]
+        [McpServerTool(ReadOnly = false, Destructive = false), Description("Adds a service record and returns additionalData.recordId. Call order: add supplies, requisition them here, then attach invoice. cost is the invoice total; labourCost/partsCost use configured extra fields. Requisitions atomically consume stock; attachments are uploaded after creation. dryRun writes nothing.")]
         public async Task<string> AddServiceRecord(
             [Description("id of the vehicle")] int vehicleId,
             [Description("Date serviced")] DateTime date,
             [Description("Odometer at time of service")] int odometer,
             [Description("Description of items serviced")] string description,
             [Description("Total cost of the service")] decimal cost,
-            [Description("Any extra fields configured for servicerecord")] List<ExtraField> extraFields)
+            [Description("Any extra fields configured for servicerecord")] List<ExtraField> extraFields,
+            List<RequisitionInput>? requisitions = null, decimal? labourCost = null, decimal? partsCost = null, List<AttachmentInput>? attachments = null,
+            [Description("Validate with LubeLogger but write nothing")] bool dryRun = false)
         {
             var requestData = new PostRequestModel
             {
@@ -182,8 +186,11 @@ namespace LubeLogMCP.MCP
                 requestData.ExtraFields.Add(new ExtraFieldPostModel { Name = extraFields[i].Name, Value = extraFields[i].Value });
             }
 
+            await AddWorkshopFields(requestData, ImportMode.ServiceRecord, labourCost, partsCost, requisitions, attachments);
+
             string endpoint = $"{instance}/api/vehicle/servicerecords/add?vehicleId={vehicleId}";
 
+            endpoint += (endpoint.Contains('?') ? "&" : "?") + "dryRun=" + dryRun;
             var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
             {
                 Content = new StringContent(JsonSerializer.Serialize(requestData), Encoding.UTF8, "application/json")
@@ -191,24 +198,25 @@ namespace LubeLogMCP.MCP
             AddAuthHeaders(request);
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadAsStringAsync();
+                var result = await Send(request);
 
-                return result;
+                return await CompleteWorkshopAdd(result, "service", attachments, dryRun);
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Adds a repair record.")]
+        [McpServerTool(ReadOnly = false, Destructive = false), Description("Adds a repair record and returns additionalData.recordId. Call order: add supplies, requisition them here, then attach invoice. cost is the invoice total; labourCost/partsCost use configured extra fields. Requisitions atomically consume stock; attachments are uploaded after creation. dryRun writes nothing.")]
         public async Task<string> AddRepairRecord(
             [Description("id of the vehicle")] int vehicleId,
             [Description("Date repaired")] DateTime date,
             [Description("Odometer at time of repair")] int odometer,
             [Description("Description of items repaired")] string description,
             [Description("Total cost of the repair")] decimal cost,
-            [Description("Any extra fields configured for repairrecord")] List<ExtraField> extraFields)
+            [Description("Any extra fields configured for repairrecord")] List<ExtraField> extraFields,
+            List<RequisitionInput>? requisitions = null, decimal? labourCost = null, decimal? partsCost = null, List<AttachmentInput>? attachments = null,
+            [Description("Validate with LubeLogger but write nothing")] bool dryRun = false)
         {
             var requestData = new PostRequestModel
             {
@@ -223,8 +231,11 @@ namespace LubeLogMCP.MCP
                 requestData.ExtraFields.Add(new ExtraFieldPostModel { Name = extraFields[i].Name, Value = extraFields[i].Value });
             }
 
+            await AddWorkshopFields(requestData, ImportMode.RepairRecord, labourCost, partsCost, requisitions, attachments);
+
             string endpoint = $"{instance}/api/vehicle/repairrecords/add?vehicleId={vehicleId}";
 
+            endpoint += (endpoint.Contains('?') ? "&" : "?") + "dryRun=" + dryRun;
             var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
             {
                 Content = new StringContent(JsonSerializer.Serialize(requestData), Encoding.UTF8, "application/json")
@@ -232,24 +243,25 @@ namespace LubeLogMCP.MCP
             AddAuthHeaders(request);
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadAsStringAsync();
+                var result = await Send(request);
 
-                return result;
+                return await CompleteWorkshopAdd(result, "repair", attachments, dryRun);
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Adds an upgrade record.")]
+        [McpServerTool(ReadOnly = false, Destructive = false), Description("Adds an upgrade record.")]
         public async Task<string> AddUpgradeRecord(
             [Description("id of the vehicle")] int vehicleId,
             [Description("Date upgraded")] DateTime date,
             [Description("Odometer at time of upgrade")] int odometer,
             [Description("Description of items upgraded")] string description,
             [Description("Total cost of the upgrade")] decimal cost,
-            [Description("Any extra fields configured for upgraderecord")] List<ExtraField> extraFields)
+            [Description("Any extra fields configured for upgraderecord")] List<ExtraField> extraFields,
+            List<RequisitionInput>? requisitions = null, decimal? labourCost = null, decimal? partsCost = null, List<AttachmentInput>? attachments = null,
+            [Description("Validate with LubeLogger but write nothing")] bool dryRun = false)
         {
             var requestData = new PostRequestModel
             {
@@ -264,8 +276,11 @@ namespace LubeLogMCP.MCP
                 requestData.ExtraFields.Add(new ExtraFieldPostModel { Name = extraFields[i].Name, Value = extraFields[i].Value });
             }
 
+            await AddWorkshopFields(requestData, ImportMode.UpgradeRecord, labourCost, partsCost, requisitions, attachments);
+
             string endpoint = $"{instance}/api/vehicle/upgraderecords/add?vehicleId={vehicleId}";
 
+            endpoint += (endpoint.Contains('?') ? "&" : "?") + "dryRun=" + dryRun;
             var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
             {
                 Content = new StringContent(JsonSerializer.Serialize(requestData), Encoding.UTF8, "application/json")
@@ -273,24 +288,25 @@ namespace LubeLogMCP.MCP
             AddAuthHeaders(request);
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadAsStringAsync();
+                var result = await Send(request);
 
-                return result;
+                return await CompleteWorkshopAdd(result, "upgrade", attachments, dryRun);
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Adds an odometer record.")]
+        [McpServerTool(ReadOnly = false, Destructive = false), Description("Adds an odometer record.")]
         public async Task<string> AddOdometerRecord(
             [Description("id of the vehicle")] int vehicleId,
             [Description("Date recorded")] DateTime date,
             [Description("Odometer recorded")] int odometer,
             [Description("Any extra fields configured for odometerrecord")] List<ExtraField> extraFields,
-            [Description("Ids of equipment equipped for the vehicle")] List<int> equipmentRecordIds)
+            [Description("Ids of equipment equipped for the vehicle")] List<int> equipmentRecordIds,
+            [Description("Validate with LubeLogger but write nothing")] bool dryRun = false)
         {
+            if (vehicleId <= 0 || odometer < 0) throw new ArgumentException("Vehicle or odometer invalid");
             var requestData = new PostRequestModel
             {
                 Date = date.ToString("yyyy-MM-dd"),
@@ -309,6 +325,7 @@ namespace LubeLogMCP.MCP
 
             string endpoint = $"{instance}/api/vehicle/odometerrecords/add?vehicleId={vehicleId}";
 
+            endpoint += (endpoint.Contains('?') ? "&" : "?") + "dryRun=" + dryRun;
             var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
             {
                 Content = new StringContent(JsonSerializer.Serialize(requestData), Encoding.UTF8, "application/json")
@@ -316,17 +333,16 @@ namespace LubeLogMCP.MCP
             AddAuthHeaders(request);
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadAsStringAsync();
+                var result = await Send(request);
 
                 return result;
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Get Equipped Equipment for a vehicle")]
+        [McpServerTool(ReadOnly = true), Description("Get Equipped Equipment for a vehicle")]
         public async Task<string> GetEquippedEquipment(
             [Description("id of the vehicle")] int vehicleId
             )
@@ -340,17 +356,17 @@ namespace LubeLogMCP.MCP
             try
             {
                 var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadFromJsonAsync<List<Equipment>>();
+                var result = await (await httpClient.SendAsync(request)).Content.ReadFromJsonAsync<List<Equipment>>();
                 result?.RemoveAll(x => !x.IsEquipped);
                 var serializedResult = JsonSerializer.Serialize(result);
                 return serializedResult;
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Adds a supply record.")]
+        [McpServerTool(ReadOnly = false, Destructive = false), Description("Adds a supply record.")]
         public async Task<string> AddSupplyRecord(
             [Description("id of the vehicle")] int vehicleId,
             [Description("Date purchased")] DateTime date,
@@ -359,8 +375,10 @@ namespace LubeLogMCP.MCP
             [Description("Cost of the supply")] decimal cost,
             [Description("Part number")] string partNumber,
             [Description("Part supplier")] string partSupplier,
-            [Description("Any extra fields configured for supplyrecord")] List<ExtraField> extraFields)
+            [Description("Any extra fields configured for supplyrecord")] List<ExtraField> extraFields,
+            [Description("Validate with LubeLogger but write nothing")] bool dryRun = false)
         {
+            if (vehicleId <= 0 || quantity <= 0 || cost < 0 || string.IsNullOrWhiteSpace(description)) throw new ArgumentException("Vehicle, quantity, cost or description invalid");
             var requestData = new PostRequestModel
             {
                 Date = date.ToString("yyyy-MM-dd"),
@@ -378,6 +396,7 @@ namespace LubeLogMCP.MCP
 
             string endpoint = $"{instance}/api/vehicle/supplyrecords/add?vehicleId={vehicleId}";
 
+            endpoint += (endpoint.Contains('?') ? "&" : "?") + "dryRun=" + dryRun;
             var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
             {
                 Content = new StringContent(JsonSerializer.Serialize(requestData), Encoding.UTF8, "application/json")
@@ -385,17 +404,16 @@ namespace LubeLogMCP.MCP
             AddAuthHeaders(request);
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadAsStringAsync();
+                var result = await Send(request);
 
                 return result;
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Adds a shop supply record.")]
+        [McpServerTool(ReadOnly = false, Destructive = false), Description("Adds a shop supply record.")]
         public async Task<string> AddShopSupplyRecord(
             [Description("Date purchased")] DateTime date,
             [Description("Description of the supply")] string description,
@@ -403,8 +421,10 @@ namespace LubeLogMCP.MCP
             [Description("Cost of the supply")] decimal cost,
             [Description("Part number")] string partNumber,
             [Description("Part supplier")] string partSupplier,
-            [Description("Any extra fields configured for supplyrecord")] List<ExtraField> extraFields)
+            [Description("Any extra fields configured for supplyrecord")] List<ExtraField> extraFields,
+            [Description("Validate with LubeLogger but write nothing")] bool dryRun = false)
         {
+            if (quantity <= 0 || cost < 0 || string.IsNullOrWhiteSpace(description)) throw new ArgumentException("Quantity, cost or description invalid");
             var requestData = new PostRequestModel
             {
                 Date = date.ToString("yyyy-MM-dd"),
@@ -422,6 +442,7 @@ namespace LubeLogMCP.MCP
 
             string endpoint = $"{instance}/api/vehicle/supplyrecords/add?vehicleId=0";
 
+            endpoint += (endpoint.Contains('?') ? "&" : "?") + "dryRun=" + dryRun;
             var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
             {
                 Content = new StringContent(JsonSerializer.Serialize(requestData), Encoding.UTF8, "application/json")
@@ -429,17 +450,16 @@ namespace LubeLogMCP.MCP
             AddAuthHeaders(request);
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadAsStringAsync();
+                var result = await Send(request);
 
                 return result;
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Adds a vehicle record.")]
+        [McpServerTool(ReadOnly = false, Destructive = false), Description("Adds a vehicle record.")]
         public async Task<string> AddVehicleRecord(
             [Description("Model year of the vehicle")] int year,
             [Description("Make of the vehicle")] string make,
@@ -448,8 +468,10 @@ namespace LubeLogMCP.MCP
             [Description("Vehicle use engine hours")] bool useEngineHours,
             [Description("Odometer is optional for vehicle")] bool odometerOptional,
             [Description("Fuel type for the vehicle")] FuelType fuelType,
-            [Description("Any extra fields configured for vehiclerecord")] List<ExtraField> extraFields)
+            [Description("Any extra fields configured for vehiclerecord")] List<ExtraField> extraFields,
+            [Description("Validate with LubeLogger but write nothing")] bool dryRun = false)
         {
+            if (year <= 0 || string.IsNullOrWhiteSpace(make) || string.IsNullOrWhiteSpace(model) || !Enum.IsDefined(fuelType)) throw new ArgumentException("Vehicle details invalid");
             var dataParams = new List<KeyValuePair<string, string>>
             {
                 new KeyValuePair<string, string>("year", year.ToString()),
@@ -470,6 +492,7 @@ namespace LubeLogMCP.MCP
 
             string endpoint = $"{instance}/api/vehicles/add";
 
+            endpoint += (endpoint.Contains('?') ? "&" : "?") + "dryRun=" + dryRun;
             var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
             {
                 Content = new FormUrlEncodedContent(dataParams)
@@ -477,17 +500,16 @@ namespace LubeLogMCP.MCP
             AddAuthHeaders(request);
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadAsStringAsync();
+                var result = await Send(request);
 
                 return result;
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Gets latest odometer reading for a vehicle.")]
+        [McpServerTool(ReadOnly = true), Description("Gets latest odometer reading for a vehicle.")]
         public async Task<string> GetLatestOdometer(
             [Description("id of the vehicle")] int vehicleId
             )
@@ -500,16 +522,16 @@ namespace LubeLogMCP.MCP
             try
             {
                 var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadAsStringAsync();
+                var result = await (await httpClient.SendAsync(request)).Content.ReadAsStringAsync();
 
                 return result;
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
-        [McpServerTool, Description("Get Extra Fields for a Record Type")]
+        [McpServerTool(ReadOnly = true), Description("Get Extra Fields for a Record Type")]
         public async Task<string> GetExtraFields(
             [Description("Record type")] ImportMode importMode
             )
@@ -522,14 +544,14 @@ namespace LubeLogMCP.MCP
             try
             {
                 var httpClient = _httpClientFactory.CreateClient();
-                var result = await httpClient.SendAsync(request).Result.Content.ReadFromJsonAsync<List<ExtraFieldsVM>>();
+                var result = await (await httpClient.SendAsync(request)).Content.ReadFromJsonAsync<List<ExtraFieldsVM>>();
                 result?.RemoveAll(x => x.RecordType != importMode.ToString());
                 var serializedResult = JsonSerializer.Serialize(result);
                 return serializedResult;
             }
             catch (Exception ex)
             {
-                return ex.Message;
+                throw new ModelContextProtocol.McpException(ex.Message);
             }
         }
         private void AddAuthHeaders(HttpRequestMessage request)
