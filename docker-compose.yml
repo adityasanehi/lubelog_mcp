@@ -1,13 +1,10 @@
----
-
 services:
-  app:
-    image: ghcr.io/hargata/lubelogger_mcp:latest
-    # environment:
-    #  - LUBELOG_INSTANCE=
-    #  - LUBELOG_USER=
-    #  - LUBELOG_PASS=
+  lubelogger-mcp:
+    image: ghcr.io/adityasanehi/lubelogger_mcp:edge
+    environment:
+      LUBELOG_INSTANCE: ${LUBELOG_INSTANCE:-http://app:8080}
     restart: unless-stopped
-    # expose port and/or use serving via traefik
     ports:
-      - 40150:8080
+      - "40150:8080"
+    # Include this service in the app compose project/network so `app` resolves.
+    # Supply auth on MCP requests; do not store account credentials here.

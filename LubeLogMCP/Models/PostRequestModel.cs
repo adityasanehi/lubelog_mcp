@@ -1,9 +1,11 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 
 namespace LubeLogMCP.Models
 {
     public class PostRequestModel
     {
+        [JsonPropertyName("requisitions"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<RequisitionInput>? Requisitions { get; set; }
         [JsonPropertyName("date")]
         public string Date { get; set; } = string.Empty;
         [JsonPropertyName("odometer")]
@@ -39,5 +41,22 @@ namespace LubeLogMCP.Models
         public string Name { get; set; } = string.Empty;
         [JsonPropertyName("value")]
         public string Value { get; set; } = string.Empty;
+    }
+}
+
+namespace LubeLogMCP.Models
+{
+    public class RequisitionInput
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("supplyRecordId")]
+        public int SupplyRecordId { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("quantity")]
+        public decimal Quantity { get; set; }
+    }
+    public class AttachmentInput
+    {
+        public string FileName { get; set; } = "";
+        public string ContentType { get; set; } = "";
+        public string ContentBase64 { get; set; } = "";
     }
 }
